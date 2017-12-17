@@ -1,0 +1,11 @@
+# AMIBakefile: MyCustomWeb
+MAINTAINER nmrmsys
+FROM ami-da9e2cbc # Amazon Linux AMI 2017.09.1 (HVM), SSD Volume Type
+USER ec2-user
+#BUILDER "vpc_id":"vpc-xxxxxxxx","subnet_id":"subnet-xxxxxxxx","associate_public_ip_address":true
+
+COPY AMIBakefile/MyCustomWeb.sh ~/
+COPY AMIBakefile/html/index.html ~/
+
+RUN sudo sh ~/MyCustomWeb.sh
+RUN sudo mv ~/index.html /var/www/html/

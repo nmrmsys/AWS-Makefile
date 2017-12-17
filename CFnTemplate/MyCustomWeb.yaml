@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: MyCustomWeb Stack
+
+Resources:
+  MyCustomWebSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MyCustomWebSg
+      VpcId:
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-MyVPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+  MyCustomWeb: 
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: !Ref MyCustomWebAmiId
+      InstanceType: t2.micro
+      SubnetId:
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-MySubnetId
+      SecurityGroupIds: [!Ref MyCustomWebSg]
+      KeyName: !Ref KeyName
+      Tags: 
+        - Key: Name
+          Value: MyCustomWeb
+  AssocMyCustomWebEip:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref MyCustomWeb
+      AllocationId:
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-MyEipId
+
+Parameters:
+  NetworkStackName:
+    Type: String
+    Default: MyNetwork
+  MyCustomWebAmiId:
+    Type: String
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName

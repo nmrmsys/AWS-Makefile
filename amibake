@@ -1,0 +1,353 @@
+#!/bin/bash
+
+# Constant definition
+PROGNAME=$(basename $0)
+VERSION="0.1.0"
+AMIBAKE_NAME="amibake:name"
+AMIBAKE_TAG="amibake:tag"
+DEFAULT_INST_TYPE="t2.micro"
+AMIBAKE_AMI_ID=".amibake.ami-id"
+AMIBAKE_NAME_TAG=".amibake.name-tag"
+AMIBAKE_PACKER_TPL=".amibake.json"
+AMIBAKE_PACKER_LOG=".amibake.log"
+
+# global variable
+bakefile="AMIBakefile"
+
+# Main procedure
+Main(){
+  # Initial setting
+  cmd=${PRAMS[0]}
+  scr_dir=$(cd $(dirname $0) && pwd)
+
+  if [ ! -d ./.amibake ]; then
+    mkdir ./.amibake
+  fi
+  
+  # sub command
+  case "$cmd" in
+    'tag' )
+      # tag ami-id name:tag
+      Tag ${PRAMS[1]} ${PRAMS[2]}
+      ;;
+    'search' )
+      # search name:tag
+      Search ${PRAMS[1]}
+      ;;
+    'id' )
+      # id name:tag
+      Id ${PRAMS[1]}
+      ;;
+    'build' )
+      Build
+      ;;
+    'push' )
+      # push name:tag
+      Push ${PRAMS[1]}
+      ;;
+    'run' )
+      # run name:tag or ami-id [key_name] [inst_type] [sg_id]
+      Run ${PRAMS[1]} ${PRAMS[2]} ${PRAMS[3]} ${PRAMS[4]}
+      ;;
+    'rmi' )
+      # rmi name:tag or ami-id
+      Rmi ${PRAMS[1]}
+      ;;
+  esac
+
+}
+
+# Function definition
+Usage(){
+cat <<EOF
+$PROGNAME - AWS EC2 AMI Build & Deploy Tool version $VERSION
+Usage: $PROGNAME <command> [--profile <prof>] [more options]
+      $PROGNAME tag ami-xxxxxxxx amazonlinux:201703
+      $PROGNAME search amazonlinux:201703
+      $PROGNAME id amazonlinux:201703
+      $PROGNAME build
+      $PROGNAME push my_app:20170819
+      $PROGNAME run my_app:20170819
+      $PROGNAME rmi my_app:20170819
+EOF
+}
+
+Tag(){
+  ami_id=$1
+  name_tag=(${2//:/ })
+  name=${name_tag[0]}
+  tmp=${name_tag[1]}
+  tag=${tmp:-latest}
+  echo aws $PROF_OPT ec2 create-tags --resources $ami_id --tags Key=$AMIBAKE_NAME,Value=$name Key=$AMIBAKE_TAG,Value=$tag > /dev/null
+  aws $PROF_OPT ec2 create-tags --resources $ami_id --tags Key=$AMIBAKE_NAME,Value=$name Key=$AMIBAKE_TAG,Value=$tag > /dev/null
+}
+
+Search(){
+  name_tag=(${1//:/ })
+  name=${name_tag[0]}
+  tag=${name_tag[1]}
+  if [ -n "$tag" ]; then
+    tag_filter="Name=tag:$AMIBAKE_TAG,Values=$tag"
+  fi
+  aws $PROF_OPT ec2 describe-images --filters "Name=tag:$AMIBAKE_NAME,Values=$name" $tag_filter --query "reverse(sort_by(Images[], &CreationDate))" \
+    | jq -r '.[] | [ .ImageId, (.Tags[]? | select(.Key=="'$AMIBAKE_NAME'")).Value, (.Tags[]? | select(.Key=="'$AMIBAKE_TAG'")).Value ] | @tsv'
+}
+
+Id(){
+  name_tag=(${1//:/ })
+  name=${name_tag[0]}
+  tag=${name_tag[1]}
+  if [ -n "$tag" ]; then
+    tag_filter="Name=tag:$AMIBAKE_TAG,Values=$tag"
+  fi
+  aws $PROF_OPT ec2 describe-images --filters "Name=tag:$AMIBAKE_NAME,Values=$name" $tag_filter --query "reverse(sort_by(Images[], &CreationDate))" \
+    | jq -r '.[] | [ .ImageId ] | @tsv'
+}
+
+Build(){
+  if [ -f "$bakefile" ]; then
+    # parse bakefile
+    IFS_BAK=$IFS
+    IFS=$'\n'
+    for line in `cat $bakefile | sed -e 's/ *#.*$//' | tr -d "\r"`; do
+      if [[ $line =~ ^FROM[[:space:]]+(.*)$ ]]; then
+        from="${BASH_REMATCH[1]}"
+        source_ami=$from
+      fi
+      if [[ $line =~ ^USER[[:space:]]+(.*)$ ]]; then
+        user="${BASH_REMATCH[1]}"
+      fi
+      if [[ $line =~ ^BUILDER[[:space:]]+(.*)$ ]]; then
+        builder="            ,${BASH_REMATCH[1]}\n"
+      fi
+      if [[ $line =~ ^COPY[[:space:]]+(.*)[[:space:]]+(.*)$ ]]; then
+        src="${BASH_REMATCH[1]}"
+        dst="${BASH_REMATCH[2]}"
+        copy="$copy        {\n            \"type\": \"file\",\n            \"source\": \"$src\",\n            \"destination\": \"$dst\"\n        },\n"
+      fi
+      if [[ $line =~ ^RUN[[:space:]]+(.*)$ ]]; then
+        run="$run                ,\"${BASH_REMATCH[1]}\"\n"
+      fi
+    done
+    IFS=$IFS_BAK
+    if [[ ! $from =~ ^ami\- ]]; then
+      ami_info=(`$scr_dir/$PROGNAME $PROF_OPT search "$from" | head -n 1`)
+      source_ami=${ami_info[0]}
+    fi
+    # write packer template
+cat <<EOF  > ./.amibake/${PROF:-default}$AMIBAKE_PACKER_TPL
+{
+    "builders": [
+        {
+            "type": "amazon-ebs"
+            ,"access_key": "{{user \`access_key\`}}"
+            ,"secret_key": "{{user \`secret_key\`}}"
+            ,"region": "{{user \`region\`}}"
+            ,"source_ami": "$source_ami"
+            ,"ami_name": "amibake {{isotime | clean_ami_name}}"
+            ,"instance_type": "$DEFAULT_INST_TYPE"
+            ,"ssh_username": "$user"
+EOF
+
+    echo -en "$builder" >> ./.amibake/${PROF:-default}$AMIBAKE_PACKER_TPL
+
+cat <<EOF >> ./.amibake/${PROF:-default}$AMIBAKE_PACKER_TPL
+        }
+    ]
+    ,"provisioners": [
+EOF
+
+    echo -en "$copy" >> ./.amibake/${PROF:-default}$AMIBAKE_PACKER_TPL
+
+cat <<EOF >> ./.amibake/${PROF:-default}$AMIBAKE_PACKER_TPL
+        {
+            "type": "shell",
+            "inline": [
+                "set -x"
+EOF
+
+    echo -en "$run" >> ./.amibake/${PROF:-default}$AMIBAKE_PACKER_TPL
+
+cat <<EOF >> ./.amibake/${PROF:-default}$AMIBAKE_PACKER_TPL
+            ]
+        }
+    ]
+}
+EOF
+
+    # get aws-cli config
+    if [ -n "$PROF" ]; then
+      prof_grep="\[profile $PROF\]"
+      echo "Setting AWS CLI profile: $PROF"
+    else
+      prof_grep="\[default\]"
+    fi
+    
+    IFS_BAK=$IFS
+    IFS=$'\n'
+    for line in `grep -A4 "$prof_grep" ~/.aws/config | tr -d "\r"`; do
+      if [[ $line =~ ^aws_access_key_id[[:space:]]=[[:space:]](.*)$ ]]; then
+        access_key="${BASH_REMATCH[1]}"
+      fi
+      if [[ $line =~ ^aws_secret_access_key[[:space:]]=[[:space:]](.*)$ ]]; then
+        secret_key="${BASH_REMATCH[1]}"
+      fi
+      if [[ $line =~ ^region[[:space:]]=[[:space:]](.*)$ ]]; then
+        region="${BASH_REMATCH[1]}"
+      fi
+    done
+    IFS=$IFS_BAK
+
+    # execute packer
+    build_ami_id=""
+    $scr_dir/packer build -var "access_key=$access_key" -var "secret_key=$secret_key" -var "region=$region" ./.amibake/${PROF:-default}$AMIBAKE_PACKER_TPL | tee ./.amibake/${PROF:-default}$AMIBAKE_PACKER_LOG
+    build_ami_id=(`cat ./.amibake/${PROF:-default}$AMIBAKE_PACKER_LOG | tail -2 | head -2 | awk 'match($0, /ami-.*/) { print substr($0, RSTART, RLENGTH) }'`)
+    if [ -z "$build_ami_id" ]; then
+      echo "packer build error"
+      exit 1
+    fi
+
+    # delete previous ami
+    if [ -f "./.amibake/${PROF:-default}$AMIBAKE_AMI_ID" ]; then
+      ami_id=`cat ./.amibake/${PROF:-default}$AMIBAKE_AMI_ID`
+      DeleteAMI $ami_id
+    fi
+
+    # set build ami-id
+    echo $build_ami_id > ./.amibake/${PROF:-default}$AMIBAKE_AMI_ID
+  else
+    echo "$bakefile not found."
+  fi
+}
+
+Push(){
+  if [ -f "./.amibake/${PROF:-default}$AMIBAKE_AMI_ID" ]; then
+    name_tag=(${1//:/ })
+    tmp=${name_tag[0]}
+    name=${tmp:-amibake}
+    tmp=${name_tag[1]}
+    tag=${tmp:-latest}
+    ami_id=`cat ./.amibake/${PROF:-default}$AMIBAKE_AMI_ID`
+    $scr_dir/$PROGNAME $PROF_OPT tag $ami_id "$name:$tag"
+    rm ./.amibake/${PROF:-default}$AMIBAKE_AMI_ID
+  else
+    echo "build image not found."
+  fi
+}
+
+Run(){
+  ami_id=$1
+  if [[ ! $ami_id =~ ^ami\- ]]; then
+    ami_info=(`$scr_dir/$PROGNAME $PROF_OPT search $ami_id | head -n 1`)
+    ami_id=${ami_info[0]}
+  fi
+  ami_id="--image-id $ami_id"
+  if [ -n "$2" ]; then
+    key_name="--key-name $2"
+  fi
+  inst_type="--instance-type ${3:-$DEFAULT_INST_TYPE}"
+  if [ -n "$4" ]; then
+    sg_id="--security-group-ids $4"
+  fi
+  aws $PROF_OPT ec2 run-instances $ami_id $sg_id $inst_type $key_name > /dev/null
+}
+
+Rmi(){
+  ami_id=$1
+  if [[ ! $ami_id =~ ^ami\- ]]; then
+    ami_info=(`$scr_dir/$PROGNAME $PROF_OPT search $ami_id | head -n 1`)
+    ami_id=${ami_info[0]}
+  fi
+  DeleteAMI $ami_id
+}
+
+DeleteAMI(){
+  ami_id=$1
+  #echo "Delete AMI $ami_id $ami_nm"
+  # Deregister target AMI
+  aws $PROF_OPT ec2 deregister-image --image-id $ami_id
+  if [ $? -ne 0 ]; then
+    echo "$ami_id Delete AMI fail."
+    return
+  fi
+  # Delete target AMI snapshots 
+  aws $PROF_OPT ec2 describe-snapshots --owner-ids self --filters "Name=description, Values=*$ami_id*" --query "Snapshots[]" \
+    | jq -r '.[] | [ .SnapshotId, .Description ] | @tsv' \
+    | while read line_snapshot
+  do
+    #echo $line_snapshot
+    DeleteSnapshot $line_snapshot
+  done
+}
+
+DeleteSnapshot(){
+  snap_id=$1
+  #echo "Delete Snapshot $snap_id $snap_dc"
+  aws $PROF_OPT ec2 delete-snapshot --snapshot-id $snap_id
+  if [ $? -ne 0 ]; then
+    echo "$snap_id Delete Snapshot fail."
+    return
+  fi
+}
+
+# getopt
+for OPT in "$@"; do
+  case "$OPT" in
+    '-h'|'--help' )
+      Usage
+      exit 1
+      ;;
+    '-f' )
+      if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]]; then
+        echo "$PROGNAME: option requires an argument -- $1" 1>&2
+        exit 1
+      fi
+      bakefile="$2"
+      shift 2
+      ;;
+    '--version' )
+      echo $VERSION
+      exit 1
+      ;;
+    '--profile' )
+      if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]]; then
+        echo "$PROGNAME: option requires an argument -- $1" 1>&2
+        exit 1
+      fi
+      PROF="$2"
+      PROF_OPT="--profile $2"
+      shift 2
+      ;;
+    '--'|'-' )
+      shift 1
+      PRAMS+=( "$@" )
+      break
+      ;;
+    -*)
+      echo "$PROGNAME: illegal option -- '$(echo $1 | sed 's/^-*//')'" 1>&2
+      exit 1
+      ;;
+    *)
+      if [[ ! -z "$1" ]] && [[ ! "$1" =~ ^-+ ]]; then
+        #PRAMS=( ${PRAMS[@]} "$1" )
+        PRAMS+=( "$1" )
+        shift 1
+      fi
+      ;;
+  esac
+done
+
+# no required argument
+if [[ ! ${PRAMS[0]} =~ (tag|search|id|build|push|run|rmi) ]]; then
+  Usage
+  exit 1
+fi
+
+#if [ -z $PRAMS ]; then
+#  echo "$PROGNAME: too few arguments" 1>&2
+#  echo "Try '$PROGNAME --help' for more information." 1>&2
+#  exit 1
+#fi
+
+# call main
+Main

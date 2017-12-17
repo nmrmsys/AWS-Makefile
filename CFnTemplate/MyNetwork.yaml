@@ -1,0 +1,67 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: MyNetwork Stack
+
+Resources:
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+      - Key: Name
+        Value: MyVPC
+  MyIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: MyIGW
+  AttachMyIGW:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref MyIGW
+  MyRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+      - Key: Name
+        Value: MyRouteTable
+  MyDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref MyRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref MyIGW
+  MySubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: True
+      VpcId: !Ref MyVPC
+      Tags:
+      - Key: Name
+        Value: MySubnet
+  AssocMyRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref MySubnet
+      RouteTableId: !Ref MyRouteTable
+  MyEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+Outputs:
+  MyVPCId:
+    Value: !Ref MyVPC
+    Export:
+      Name: !Sub ${AWS::StackName}-MyVPCId
+  MySubnetId:
+    Value: !Ref MySubnet
+    Export:
+      Name: !Sub ${AWS::StackName}-MySubnetId
+  MyEipId:
+    Value: !GetAtt [MyEip, AllocationId]
+    Export:
+      Name: !Sub ${AWS::StackName}-MyEipId
